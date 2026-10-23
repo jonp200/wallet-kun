@@ -1,0 +1,123 @@
+openapi: 3.1.0
+info:
+  title: Wallet-kun service
+  description: Wallet-kun service
+  version: 1.0.0
+servers:
+  - url: 'http://localhost:5000'
+paths:
+  /healthz:
+    get:
+      responses:
+        '200':
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/health'
+  /accounts/{id}/debits:
+    post:
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+        - in: header
+          name: X-Request-ID
+          schema:
+            type: string
+          required: true
+        - in: header
+          name: Idempotency-Key
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/debit_request'
+      responses:
+        '200':
+          description: Debit completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/debit_response'
+              example:
+                transaction_id: '4af203b6-9840-49e5-95dd-dcfc73154493'
+                merchant_reference: 'order-001'
+                status: 'completed'
+        '202':
+          description: Debit accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/debit_response'
+              example:
+                transaction_id: '4af203b6-9840-49e5-95dd-dcfc73154493'
+                order_reference: 'order-001'
+                status: 'accepted'
+        '403':
+          description: Forbidden request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/request_error'
+              example:
+                error: 'Account does not exist'
+        '409':
+          description: Conflict request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/request_error'
+              example:
+                error: 'Conflict with a previous identical request'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/request_error'
+              example:
+                error: 'amount_minor_units is required'
+components:
+  schemas:
+    health:
+      type: object
+      properties:
+        status:
+          type: string
+    debit_request:
+      type: object
+      properties:
+        order_reference:
+          type: string
+          format: uuid
+        amount_minor_units:
+          type: integer
+          minimum: 1
+        currency:
+          type: string
+          enum:
+            - PHP
+    debit_response:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        order_reference:
+          type: string
+          format: uuid
+        status:
+          type: string
+    request_error:
+      type: object
+      properties:
+        error:
+          type: string
