@@ -61,8 +61,24 @@ paths:
                 transaction_id: '4af203b6-9840-49e5-95dd-dcfc73154493'
                 order_reference: 'order-001'
                 status: 'accepted'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/request_error'
+              example:
+                error: 'Account ID is malformed or missing'
         '403':
-          description: Forbidden request
+          description: Forbidden access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/request_error'
+              example:
+                error: 'Account exists but the user lacks permission'
+        '404':
+          description: Account not found
           content:
             application/json:
               schema:
@@ -84,7 +100,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/request_error'
               example:
-                error: 'amount_minor_units is required'
+                error: 'Account exists but has insufficient funds'
 components:
   schemas:
     health:
@@ -105,6 +121,11 @@ components:
           type: string
           enum:
             - PHP
+    debit_status:
+      type: string
+      enum:
+        - accepted
+        - completed
     debit_response:
       type: object
       properties:
@@ -115,7 +136,7 @@ components:
           type: string
           format: uuid
         status:
-          type: string
+          $ref: '#/components/schemas/debit_status'
     request_error:
       type: object
       properties:
