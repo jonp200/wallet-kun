@@ -1,144 +1,107 @@
 openapi: 3.1.0
 info:
   title: Wallet-kun service
-  description: Wallet-kun service
+  description: Debits commit atomically before HTTP 200. HTTP 202 is reserved for future Kafka processing.
   version: 1.0.0
 servers:
-  - url: 'http://localhost:5000'
+  - url: http://localhost:5000
 paths:
   /healthz:
     get:
       responses:
         '200':
-          description: Service health
+          description: PostgreSQL is reachable
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/health'
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [ok]}
+        '503':
+          $ref: '#/components/responses/error'
   /accounts/{id}/debits:
     post:
+      description: A new debit is durably committed before 200. An identical retry returns 200 and the original transaction ID. HTTP 202 is reserved for future Kafka processing. Failed requests do not consume idempotency keys.
       parameters:
         - in: path
           name: id
-          schema:
-            type: string
-            format: uuid
           required: true
+          schema: {$ref: '#/components/schemas/uuid'}
         - in: header
           name: X-Request-ID
-          schema:
-            type: string
           required: true
+          schema: {$ref: '#/components/schemas/uuid'}
         - in: header
           name: Idempotency-Key
-          schema:
-            type: string
-            format: uuid
           required: true
+          schema: {$ref: '#/components/schemas/uuid'}
       requestBody:
+        required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/debit_request'
+            schema: {$ref: '#/components/schemas/debit_request'}
       responses:
         '200':
-          description: Debit completed
+          description: New or identical completed debit; status is completed
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/debit_response'
-              example:
-                transaction_id: '4af203b6-9840-49e5-95dd-dcfc73154493'
-                merchant_reference: 'order-001'
-                status: 'completed'
+              schema: {$ref: '#/components/schemas/debit_response'}
         '202':
-          description: Debit accepted
+          description: Reserved for future Kafka processing; status is accepted
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/debit_response'
-              example:
-                transaction_id: '4af203b6-9840-49e5-95dd-dcfc73154493'
-                order_reference: 'order-001'
-                status: 'accepted'
+              schema: {$ref: '#/components/schemas/debit_response'}
         '400':
-          description: Invalid request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/request_error'
-              example:
-                error: 'Account ID is malformed or missing'
+          $ref: '#/components/responses/error'
         '403':
-          description: Forbidden access
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/request_error'
-              example:
-                error: 'Account exists but the user lacks permission'
+          description: Reserved for future authorization
         '404':
-          description: Account not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/request_error'
-              example:
-                error: 'Account does not exist'
+          $ref: '#/components/responses/error'
         '409':
-          description: Conflict request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/request_error'
-              example:
-                error: 'Conflict with a previous identical request'
+          $ref: '#/components/responses/error'
         '422':
-          description: Validation error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/request_error'
-              example:
-                error: 'Account exists but has insufficient funds'
+          $ref: '#/components/responses/error'
+        '500':
+          $ref: '#/components/responses/error'
 components:
+  responses:
+    error:
+      description: Error details (400 validation, 404 account missing, 409 key conflict, 422 insufficient funds, 500 internal error, 503 unavailable)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/request_error'}
   schemas:
-    health:
-      type: object
-      properties:
-        status:
-          type: string
+    uuid:
+      type: string
+      format: uuid
+      description: Nonzero UUID in canonical hyphenated representation
+      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+      not: {const: '00000000-0000-0000-0000-000000000000'}
     debit_request:
       type: object
+      additionalProperties: false
+      required: [order_reference, amount_minor_units, currency]
       properties:
-        order_reference:
-          type: string
-          format: uuid
+        order_reference: {$ref: '#/components/schemas/uuid'}
         amount_minor_units:
           type: integer
+          format: int64
           minimum: 1
-        currency:
-          type: string
-          enum:
-            - PHP
+          maximum: 9223372036854775807
+        currency: {type: string, enum: [PHP]}
     debit_status:
       type: string
-      enum:
-        - accepted
-        - completed
+      enum: [accepted, completed]
     debit_response:
       type: object
+      required: [transaction_id, order_reference, status]
       properties:
-        transaction_id:
-          type: string
-          format: uuid
-        order_reference:
-          type: string
-          format: uuid
-        status:
-          $ref: '#/components/schemas/debit_status'
+        transaction_id: {$ref: '#/components/schemas/uuid'}
+        order_reference: {$ref: '#/components/schemas/uuid'}
+        status: {$ref: '#/components/schemas/debit_status'}
     request_error:
       type: object
+      required: [error]
       properties:
-        error:
-          type: string
+        error: {type: string}

@@ -1,0 +1,7 @@
+.git
+.agents
+.codex
+logs
+*.log
+*.exe
+.env

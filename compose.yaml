@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: wallet
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U wallet -d wallet]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  api:
+    build: .
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgres://wallet:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/wallet?sslmode=disable
+    ports:
+      - 5000:5000
+    volumes:
+      - logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  logs:

@@ -1,0 +1,16 @@
+services:
+  test-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: wallet_test
+      POSTGRES_PASSWORD: wallet_test
+      POSTGRES_DB: wallet_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U wallet_test -d wallet_test]
+      interval: 1s
+      timeout: 3s
+      retries: 30
