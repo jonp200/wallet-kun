@@ -4,6 +4,8 @@ A small wallet service for demonstrating high throughput and scalable service.
 
 ## Specifications
 
+[`spec.yaml`](spec.yaml) is the API contract. The implementation contract below specifies storage, logging, and runtime behavior.
+
 ### Debits
 
 #### Request
@@ -106,6 +108,7 @@ Run `go test ./...` without PostgreSQL or Docker. Unit tests cover HTTP validati
 $env:CGO_ENABLED = '0'
 go test -count=1 ./...
 go vet ./...
+golangci-lint run ./...
 ```
 
 ### PostgreSQL startup credentials

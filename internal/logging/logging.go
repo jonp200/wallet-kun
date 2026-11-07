@@ -10,6 +10,12 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+const (
+	maxSizeMiB = 10
+	maxBackups = 5
+	maxAgeDays = 30
+)
+
 func Setup(env, filename string) (func() error, error) {
 	var writer io.Writer = os.Stdout
 	closeLog := func() error { return nil }
@@ -29,7 +35,13 @@ func Setup(env, filename string) (func() error, error) {
 		if err = file.Close(); err != nil {
 			return nil, err
 		}
-		rotation := &lumberjack.Logger{Filename: filename, MaxSize: 10, MaxBackups: 5, MaxAge: 30, Compress: true}
+		rotation := &lumberjack.Logger{
+			Filename:   filename,
+			MaxSize:    maxSizeMiB,
+			MaxBackups: maxBackups,
+			MaxAge:     maxAgeDays,
+			Compress:   true,
+		}
 		writer, closeLog = rotation, rotation.Close
 	default:
 		return nil, errors.New("APP_ENV must be production or development")

@@ -23,10 +23,11 @@ func assertJSONLog(t *testing.T, filename string) {
 		t.Fatal(err)
 	}
 	var entry map[string]any
-	if err := json.Unmarshal(data, &entry); err != nil {
+	if err = json.Unmarshal(data, &entry); err != nil {
 		t.Fatalf("invalid structured log: %s (%v)", data, err)
 	}
-	if entry["msg"] != "test event" || entry["level"] != "INFO" || entry["operation"] != "debit" || entry["time"] == nil {
+	if entry["msg"] != "test event" || entry["level"] != "INFO" || entry["operation"] != "debit" ||
+		entry["time"] == nil {
 		t.Fatalf("unexpected log fields: %v", entry)
 	}
 }
@@ -45,11 +46,12 @@ func TestProductionLogging(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
-				if err := closeLog(); err != nil {
-					t.Error(err)
+				if closeErr := closeLog(); closeErr != nil {
+					t.Error(closeErr)
 				}
 			})
-			slog.Info("test event", "operation", "debit")
+			logger := slog.Default()
+			logger.Info("test event", "operation", "debit")
 			filename := tc.filename
 			if filename == "" {
 				filename = filepath.Join("logs", "wallet-kun.log")
@@ -67,19 +69,23 @@ func TestDevelopmentLoggingUsesConsole(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := os.Stdout
-	os.Stdout = console
-	t.Cleanup(func() { os.Stdout = original; console.Close() })
+	os.Stdout = console //nolint:reassign // Capture the console selected by Setup without changing its public API.
+	t.Cleanup(func() {
+		os.Stdout = original //nolint:reassign // Restore stdout after capturing development logs.
+		console.Close()
+	})
 	unusedPath := filepath.Join(dir, "unused", "service.log")
 	closeLog, err := logging.Setup("development", unusedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	slog.Info("test event", "operation", "debit")
-	if err := closeLog(); err != nil {
+	logger := slog.Default()
+	logger.Info("test event", "operation", "debit")
+	if err = closeLog(); err != nil {
 		t.Fatal(err)
 	}
 	assertJSONLog(t, console.Name())
-	if _, err := os.Stat(filepath.Dir(unusedPath)); !os.IsNotExist(err) {
+	if _, err = os.Stat(filepath.Dir(unusedPath)); !os.IsNotExist(err) {
 		t.Fatalf("development logging touched the file output path: %v", err)
 	}
 }
@@ -89,21 +95,7 @@ func TestLoggingSetupFailuresPreserveExistingLogger(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			preserveLogger(t)
 			original := slog.Default()
-			env := "production"
-			filename := filepath.Join(t.TempDir(), "output")
-			switch name {
-			case "unknown environment":
-				env = "staging"
-			case "directory is a file":
-				if err := os.WriteFile(filename, []byte("occupied"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				filename = filepath.Join(filename, "service.log")
-			case "log path is a directory":
-				if err := os.Mkdir(filename, 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
+			env, filename := failedLoggingConfig(t, name)
 			closeLog, err := logging.Setup(env, filename)
 			if err == nil {
 				if closeLog != nil {
@@ -119,4 +111,24 @@ func TestLoggingSetupFailuresPreserveExistingLogger(t *testing.T) {
 			}
 		})
 	}
+}
+
+func failedLoggingConfig(t *testing.T, name string) (string, string) {
+	t.Helper()
+	env := "production"
+	filename := filepath.Join(t.TempDir(), "output")
+	switch name {
+	case "unknown environment":
+		env = "staging"
+	case "directory is a file":
+		if err := os.WriteFile(filename, []byte("occupied"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		filename = filepath.Join(filename, "service.log")
+	case "log path is a directory":
+		if err := os.Mkdir(filename, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return env, filename
 }

@@ -19,6 +19,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	startupTimeout    = 30 * time.Second
+	readHeaderTimeout = 5 * time.Second
+	requestTimeout    = 15 * time.Second
+	idleTimeout       = 60 * time.Second
+	maxHeaderBytes    = 16 << 10
+)
+
 func main() {
 	closeLog, err := logging.Setup(os.Getenv("APP_ENV"), os.Getenv("LOG_FILE"))
 	if err != nil {
@@ -27,7 +35,8 @@ func main() {
 	}
 	err = run()
 	if err != nil {
-		slog.Error("service stopped", "reason", err.Error())
+		logger := slog.Default()
+		logger.Error("service stopped", "reason", err.Error())
 	}
 	_ = closeLog()
 	if err != nil {
@@ -43,7 +52,7 @@ func run() error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is required")
 	}
-	startup, cancel := context.WithTimeout(ctx, 30*time.Second)
+	startup, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
 	pool, err := pgxpool.New(startup, databaseURL)
 	if err != nil {
@@ -51,27 +60,35 @@ func run() error {
 	}
 	defer pool.Close()
 	st := store.New(pool)
-	if err := st.Migrate(startup); err != nil {
+	if err = st.Migrate(startup); err != nil {
 		return errors.New("database initialization failed")
 	}
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":5000"
 	}
-	server := &http.Server{Addr: addr, Handler: api.New(st).Handler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           api.New(st).Handler(),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       requestTimeout,
+		WriteTimeout:      requestTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
-	slog.Info("service started", "address", addr)
+	logger := slog.Default()
+	logger.InfoContext(ctx, "service started", "address", addr)
 	select {
-	case err := <-done:
+	case err = <-done:
 		if !errors.Is(err, http.ErrServerClosed) {
 			return errors.New("HTTP listener failed")
 		}
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
+		shutdown, cancelShutdown := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancelShutdown()
+		if err = server.Shutdown(shutdown); err != nil {
 			_ = server.Close()
 			return errors.New("HTTP shutdown timed out")
 		}

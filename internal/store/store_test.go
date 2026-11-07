@@ -26,7 +26,13 @@ func TestInvalidDebitIsRejectedBeforeDatabaseAccess(t *testing.T) {
 		{"unsupported currency", func(r *store.DebitRequest) { r.Currency = "USD" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := store.DebitRequest{AccountID: uuid.New(), Key: uuid.New(), OrderReference: uuid.New(), Amount: 1, Currency: "PHP"}
+			req := store.DebitRequest{
+				AccountID:      uuid.New(),
+				Key:            uuid.New(),
+				OrderReference: uuid.New(),
+				Amount:         1,
+				Currency:       "PHP",
+			}
 			tc.modify(&req)
 			// A nil pool ensures invalid input never reaches the database.
 			result, err := store.New(nil).Debit(context.Background(), req)

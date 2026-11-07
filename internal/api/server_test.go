@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,19 +95,23 @@ func TestDebitMapsRequestAndReturnsCompletedResult(t *testing.T) {
 	}
 	result := store.DebitResult{TransactionID: uuid.New(), OrderReference: want.OrderReference, Status: "completed"}
 	calls := 0
-	var passedContext context.Context
-	handler := unitHandler(t, stubStore{debit: func(ctx context.Context, got store.DebitRequest) (store.DebitResult, error) {
-		calls++
-		if got != want {
-			t.Errorf("request = %+v, want %+v", got, want)
-		}
-		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 10*time.Second {
-			t.Errorf("expected a live deadline within ten seconds, got %v", deadline)
-		}
-		passedContext = ctx
-		return result, nil
-	}}, io.Discard)
+	var contextErr func() error
+	handler := unitHandler(
+		t,
+		stubStore{debit: func(ctx context.Context, got store.DebitRequest) (store.DebitResult, error) {
+			calls++
+			if got != want {
+				t.Errorf("request = %+v, want %+v", got, want)
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 10*time.Second {
+				t.Errorf("expected a live deadline within ten seconds, got %v", deadline)
+			}
+			contextErr = ctx.Err
+			return result, nil
+		}},
+		io.Discard,
+	)
 	response := httptest.NewRecorder()
 	req := unitRequest()
 	// UUIDs are compared semantically, and the trace header is normalized.
@@ -121,8 +127,40 @@ func TestDebitMapsRequestAndReturnsCompletedResult(t *testing.T) {
 	if response.Header().Get("X-Request-ID") != unitRequestID {
 		t.Fatal("request ID was not echoed in canonical form")
 	}
-	if passedContext.Err() != context.Canceled {
+	if !errors.Is(contextErr(), context.Canceled) {
 		t.Fatal("request timeout context was not released after responding")
+	}
+}
+
+func TestDebitAcceptsAmountBoundariesAndReorderedFields(t *testing.T) {
+	for _, amount := range []int64{1, math.MaxInt64} {
+		t.Run(strconv.FormatInt(amount, 10), func(t *testing.T) {
+			calls := 0
+			handler := unitHandler(
+				t,
+				stubStore{debit: func(_ context.Context, req store.DebitRequest) (store.DebitResult, error) {
+					calls++
+					if req.Amount != amount || req.OrderReference.String() != unitOrder || req.Currency != "PHP" {
+						t.Fatalf("unexpected debit fields: %+v", req)
+					}
+					return store.DebitResult{
+						TransactionID:  uuid.New(),
+						OrderReference: req.OrderReference,
+						Status:         "completed",
+					}, nil
+				}},
+				io.Discard,
+			)
+			req := unitRequest()
+			req.Body = io.NopCloser(strings.NewReader(fmt.Sprintf(
+				`{ "currency": "PHP", "amount_minor_units": %d, "order_reference": %q }`, amount, unitOrder,
+			)))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != http.StatusOK || calls != 1 {
+				t.Fatalf("status=%d calls=%d body=%s", response.Code, calls, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -133,17 +171,29 @@ func TestDebitRejectsInvalidRequestsBeforeStorage(t *testing.T) {
 		body   string
 	}{
 		{name: "malformed account", modify: func(r *http.Request) { r.URL.Path = "/accounts/bad/debits" }},
-		{name: "zero account", modify: func(r *http.Request) { r.URL.Path = "/accounts/" + uuid.Nil.String() + "/debits" }},
+		{
+			name:   "zero account",
+			modify: func(r *http.Request) { r.URL.Path = "/accounts/" + uuid.Nil.String() + "/debits" },
+		},
 		{name: "missing request ID", modify: func(r *http.Request) { r.Header.Del("X-Request-ID") }},
-		{name: "malformed request ID", modify: func(r *http.Request) { r.Header.Set("X-Request-ID", "private-invalid-header") }},
+		{
+			name:   "malformed request ID",
+			modify: func(r *http.Request) { r.Header.Set("X-Request-ID", "private-invalid-header") },
+		},
 		{name: "zero request ID", modify: func(r *http.Request) { r.Header.Set("X-Request-ID", uuid.Nil.String()) }},
 		{name: "missing key", modify: func(r *http.Request) { r.Header.Del("Idempotency-Key") }},
 		{name: "malformed key", modify: func(r *http.Request) { r.Header.Set("Idempotency-Key", "invalid") }},
 		{name: "zero key", modify: func(r *http.Request) { r.Header.Set("Idempotency-Key", uuid.Nil.String()) }},
-		{name: "compact UUID key", modify: func(r *http.Request) { r.Header.Set("Idempotency-Key", strings.ReplaceAll(unitKey, "-", "")) }},
+		{
+			name:   "compact UUID key",
+			modify: func(r *http.Request) { r.Header.Set("Idempotency-Key", strings.ReplaceAll(unitKey, "-", "")) },
+		},
 		{name: "missing content type", modify: func(r *http.Request) { r.Header.Del("Content-Type") }},
 		{name: "wrong content type", modify: func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }},
-		{name: "malformed content type", modify: func(r *http.Request) { r.Header.Set("Content-Type", "application/json; broken") }},
+		{
+			name:   "malformed content type",
+			modify: func(r *http.Request) { r.Header.Set("Content-Type", "application/json; broken") },
+		},
 		{name: "empty object", body: `{}`},
 		{name: "null", body: `null`},
 		{name: "malformed JSON", body: `{`},
@@ -158,6 +208,16 @@ func TestDebitRejectsInvalidRequestsBeforeStorage(t *testing.T) {
 		{name: "missing currency", body: strings.Replace(unitBody, `,"currency":"PHP"`, "", 1)},
 		{name: "unsupported currency", body: strings.Replace(unitBody, "PHP", "USD", 1)},
 		{name: "unknown field", body: strings.Replace(unitBody, "{", `{"unexpected":true,`, 1)},
+		{name: "wrong case order field", body: strings.Replace(unitBody, "order_reference", "Order_Reference", 1)},
+		{
+			name: "wrong case amount field",
+			body: strings.Replace(unitBody, "amount_minor_units", "AMOUNT_MINOR_UNITS", 1),
+		},
+		{name: "wrong case currency field", body: strings.Replace(unitBody, "currency", "Currency", 1)},
+		{name: "extra case variant field", body: strings.Replace(unitBody, "{", `{"Currency":"PHP",`, 1)},
+		{name: "null amount", body: strings.Replace(unitBody, "7000", "null", 1)},
+		{name: "null order", body: strings.Replace(unitBody, `"`+unitOrder+`"`, "null", 1)},
+		{name: "null currency", body: strings.Replace(unitBody, `"PHP"`, "null", 1)},
 		{name: "multiple values", body: unitBody + ` {}`},
 		{name: "trailing garbage", body: unitBody + `x`},
 		{name: "oversized", body: unitBody + strings.Repeat(" ", 16<<10)},
@@ -165,10 +225,14 @@ func TestDebitRejectsInvalidRequestsBeforeStorage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			handler := unitHandler(t, stubStore{debit: func(context.Context, store.DebitRequest) (store.DebitResult, error) {
-				calls++
-				return store.DebitResult{}, nil
-			}}, io.Discard)
+			handler := unitHandler(
+				t,
+				stubStore{debit: func(context.Context, store.DebitRequest) (store.DebitResult, error) {
+					calls++
+					return store.DebitResult{}, nil
+				}},
+				io.Discard,
+			)
 			req := unitRequest()
 			if tc.body != "" {
 				req.Body = io.NopCloser(strings.NewReader(tc.body))
@@ -188,23 +252,31 @@ func TestDebitRejectsInvalidRequestsBeforeStorage(t *testing.T) {
 
 func TestDebitDomainErrors(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		err    error
-		status int
+		name    string
+		err     error
+		status  int
+		message string
 	}{
-		{"account missing", store.ErrAccountNotFound, http.StatusNotFound},
-		{"insufficient funds", store.ErrInsufficientFunds, http.StatusUnprocessableEntity},
-		{"key conflict", store.ErrConflict, http.StatusConflict},
-		{"invalid debit", store.ErrInvalid, http.StatusBadRequest},
-		{"wrapped conflict", fmt.Errorf("debit rejected: %w", store.ErrConflict), http.StatusConflict},
+		{"account missing", store.ErrAccountNotFound, http.StatusNotFound, store.ErrAccountNotFound.Error()},
+		{"insufficient funds", store.ErrInsufficientFunds, http.StatusUnprocessableEntity, store.ErrInsufficientFunds.Error()},
+		{"key conflict", store.ErrConflict, http.StatusConflict, store.ErrConflict.Error()},
+		{"invalid debit", store.ErrInvalid, http.StatusBadRequest, store.ErrInvalid.Error()},
+		{"wrapped missing account", fmt.Errorf("private account: %w", store.ErrAccountNotFound), http.StatusNotFound, store.ErrAccountNotFound.Error()},
+		{"wrapped insufficient funds", fmt.Errorf("private balance: %w", store.ErrInsufficientFunds), http.StatusUnprocessableEntity, store.ErrInsufficientFunds.Error()},
+		{"wrapped conflict", fmt.Errorf("private key: %w", store.ErrConflict), http.StatusConflict, store.ErrConflict.Error()},
+		{"wrapped invalid", fmt.Errorf("private payload: %w", store.ErrInvalid), http.StatusBadRequest, store.ErrInvalid.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := unitHandler(t, stubStore{debit: func(context.Context, store.DebitRequest) (store.DebitResult, error) {
-				return store.DebitResult{}, tc.err
-			}}, io.Discard)
+			handler := unitHandler(
+				t,
+				stubStore{debit: func(context.Context, store.DebitRequest) (store.DebitResult, error) {
+					return store.DebitResult{}, tc.err
+				}},
+				io.Discard,
+			)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, unitRequest())
-			assertUnitError(t, response, tc.status, tc.err.Error())
+			assertUnitError(t, response, tc.status, tc.message)
 		})
 	}
 }
@@ -218,18 +290,22 @@ func TestDebitRespectsParentContext(t *testing.T) {
 			if canceled {
 				cancel()
 			}
-			handler := unitHandler(t, stubStore{debit: func(ctx context.Context, _ store.DebitRequest) (store.DebitResult, error) {
-				if canceled && !errors.Is(ctx.Err(), context.Canceled) {
-					t.Error("parent cancellation was not propagated")
-				}
-				if got, ok := ctx.Deadline(); !ok || got != deadline {
-					t.Errorf("caller deadline changed: %v, want %v", got, deadline)
-				}
-				if canceled {
-					return store.DebitResult{}, ctx.Err()
-				}
-				return store.DebitResult{}, context.DeadlineExceeded
-			}}, io.Discard)
+			handler := unitHandler(
+				t,
+				stubStore{debit: func(ctx context.Context, _ store.DebitRequest) (store.DebitResult, error) {
+					if canceled && !errors.Is(ctx.Err(), context.Canceled) {
+						t.Error("parent cancellation was not propagated")
+					}
+					if got, ok := ctx.Deadline(); !ok || got != deadline {
+						t.Errorf("caller deadline changed: %v, want %v", got, deadline)
+					}
+					if canceled {
+						return store.DebitResult{}, ctx.Err()
+					}
+					return store.DebitResult{}, context.DeadlineExceeded
+				}},
+				io.Discard,
+			)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, unitRequest().WithContext(parent))
 			assertUnitError(t, response, http.StatusInternalServerError, "internal server error")
@@ -252,12 +328,16 @@ func TestInternalFailuresAreSanitizedAndTraced(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
-			handler := unitHandler(t, stubStore{debit: func(context.Context, store.DebitRequest) (store.DebitResult, error) {
-				if tc.panicValue != nil {
-					panic(tc.panicValue)
-				}
-				return store.DebitResult{}, tc.err
-			}}, &output)
+			handler := unitHandler(
+				t,
+				stubStore{debit: func(context.Context, store.DebitRequest) (store.DebitResult, error) {
+					if tc.panicValue != nil {
+						panic(tc.panicValue)
+					}
+					return store.DebitResult{}, tc.err
+				}},
+				&output,
+			)
 			req := unitRequest()
 			req.URL.RawQuery = "customer=private-query"
 			response := httptest.NewRecorder()
@@ -268,30 +348,51 @@ func TestInternalFailuresAreSanitizedAndTraced(t *testing.T) {
 					t.Fatalf("sensitive detail leaked: %q", secret)
 				}
 			}
-			entries := strings.Split(strings.TrimSpace(output.String()), "\n")
-			if len(entries) != 2 {
-				t.Fatalf("expected error and access logs, got %s", output.String())
-			}
-			var failure, access map[string]any
-			if err := json.Unmarshal([]byte(entries[0]), &failure); err != nil {
-				t.Fatal(err)
-			}
-			if err := json.Unmarshal([]byte(entries[1]), &access); err != nil {
-				t.Fatal(err)
-			}
-			if failure["msg"] != tc.wantMessage || failure["level"] != "ERROR" {
-				t.Fatalf("unexpected error log: %v", failure)
-			}
-			if tc.wantField == "sqlstate" && failure["sqlstate"] != "08006" {
-				t.Fatalf("SQLSTATE missing: %v", failure)
-			}
-			if tc.wantField == "timeout" && failure["timeout"] != true {
-				t.Fatalf("timeout metric missing: %v", failure)
-			}
-			if access["request_id"] != unitRequestID || access["route"] != "/accounts/:id/debits" || access["status"] != float64(500) || access["duration_ms"] == nil {
-				t.Fatalf("access log lacks safe tracing fields: %v", access)
-			}
+			failure, access := failureLogs(t, output.String())
+			assertFailureLog(t, failure, tc.wantMessage, tc.wantField)
+			assertAccessLog(t, access)
 		})
+	}
+}
+
+func assertFailureLog(t *testing.T, failure map[string]any, message, field string) {
+	t.Helper()
+	if failure["msg"] != message || failure["level"] != "ERROR" {
+		t.Fatalf("unexpected error log: %v", failure)
+	}
+	if field == "sqlstate" && failure["sqlstate"] != "08006" {
+		t.Fatalf("SQLSTATE missing: %v", failure)
+	}
+	if field == "timeout" && failure["timeout"] != true {
+		t.Fatalf("timeout metric missing: %v", failure)
+	}
+}
+
+func failureLogs(t *testing.T, output string) (map[string]any, map[string]any) {
+	t.Helper()
+	entries := strings.Split(strings.TrimSpace(output), "\n")
+	if len(entries) != 2 {
+		t.Fatalf("expected error and access logs, got %s", output)
+	}
+	var failure, access map[string]any
+	if err := json.Unmarshal([]byte(entries[0]), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(entries[1]), &access); err != nil {
+		t.Fatal(err)
+	}
+	if failure["request_id"] != unitRequestID || failure["route"] != "/accounts/:id/debits" {
+		t.Fatalf("failure log lacks safe tracing fields: %v", failure)
+	}
+	return failure, access
+}
+
+func assertAccessLog(t *testing.T, access map[string]any) {
+	t.Helper()
+	if access["request_id"] != unitRequestID || access["route"] != "/accounts/:id/debits" ||
+		access["status"] != float64(500) ||
+		access["duration_ms"] == nil {
+		t.Fatalf("access log lacks safe tracing fields: %v", access)
 	}
 }
 

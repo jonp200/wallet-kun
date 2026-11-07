@@ -31,7 +31,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	// Rollback is a no-op after commit; pgx closes the connection on rollback failure.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	// Serialize initial schema creation across service instances.
 	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(782146052)"); err != nil {
 		return err
@@ -63,14 +64,16 @@ type DebitResult struct {
 // updates serialize distinct keys without an application-local lock.
 func (s *Store) Debit(ctx context.Context, req DebitRequest) (DebitResult, error) {
 	var result DebitResult
-	if req.AccountID == uuid.Nil || req.Key == uuid.Nil || req.OrderReference == uuid.Nil || req.Amount <= 0 || req.Currency != "PHP" {
+	if req.AccountID == uuid.Nil || req.Key == uuid.Nil || req.OrderReference == uuid.Nil || req.Amount <= 0 ||
+		req.Currency != "PHP" {
 		return result, ErrInvalid
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return result, fmt.Errorf("begin debit: %w", err)
 	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
+	// Rollback is a no-op after commit; pgx closes the connection on rollback failure.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	result = DebitResult{TransactionID: uuid.New(), OrderReference: req.OrderReference, Status: "completed"}
 	// Defer the account FK so replay/conflict detection works for a changed account.
 	tag, err := tx.Exec(ctx, `INSERT INTO debit_transactions
@@ -103,7 +106,8 @@ func (s *Store) Debit(ctx context.Context, req DebitRequest) (DebitResult, error
 	}
 	if tag.RowsAffected() == 0 {
 		var exists bool
-		if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=$1)", req.AccountID).Scan(&exists); err != nil {
+		if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=$1)", req.AccountID).
+			Scan(&exists); err != nil {
 			return result, fmt.Errorf("check account: %w", err)
 		}
 		if !exists {
