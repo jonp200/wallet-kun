@@ -22,6 +22,21 @@ var (
 //go:embed schema.sql
 var schema string
 
+//go:embed queries/lock_schema.sql
+var lockSchemaSQL string
+
+//go:embed queries/insert_debit.sql
+var insertDebitSQL string
+
+//go:embed queries/read_debit.sql
+var readDebitSQL string
+
+//go:embed queries/update_balance.sql
+var updateBalanceSQL string
+
+//go:embed queries/account_exists.sql
+var accountExistsSQL string
+
 type Store struct{ pool *pgxpool.Pool }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -34,7 +49,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// Rollback is a no-op after commit; pgx closes the connection on rollback failure.
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	// Serialize initial schema creation across service instances.
-	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(782146052)"); err != nil {
+	if _, err = tx.Exec(ctx, lockSchemaSQL); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, schema); err != nil {
@@ -76,9 +91,7 @@ func (s *Store) Debit(ctx context.Context, req DebitRequest) (DebitResult, error
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	result = DebitResult{TransactionID: uuid.New(), OrderReference: req.OrderReference, Status: "completed"}
 	// Defer the account FK so replay/conflict detection works for a changed account.
-	tag, err := tx.Exec(ctx, `INSERT INTO debit_transactions
-  (id, idempotency_key, account_id, order_reference, amount_minor_units, currency)
-  VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (idempotency_key) DO NOTHING`,
+	tag, err := tx.Exec(ctx, insertDebitSQL,
 		result.TransactionID, req.Key, req.AccountID, req.OrderReference, req.Amount, req.Currency)
 	if err != nil {
 		return result, fmt.Errorf("insert debit: %w", err)
@@ -87,8 +100,7 @@ func (s *Store) Debit(ctx context.Context, req DebitRequest) (DebitResult, error
 		var account, order uuid.UUID
 		var amount int64
 		var currency string
-		err = tx.QueryRow(ctx, `SELECT id, account_id, order_reference, amount_minor_units, currency
-   FROM debit_transactions WHERE idempotency_key=$1`, req.Key).
+		err = tx.QueryRow(ctx, readDebitSQL, req.Key).
 			Scan(&result.TransactionID, &account, &order, &amount, &currency)
 		if err != nil {
 			return result, fmt.Errorf("read debit: %w", err)
@@ -99,14 +111,13 @@ func (s *Store) Debit(ctx context.Context, req DebitRequest) (DebitResult, error
 		result.OrderReference = order
 		return result, nil
 	}
-	tag, err = tx.Exec(ctx, `UPDATE accounts SET balance=balance-$2, updated_at=clock_timestamp()
-  WHERE id=$1 AND balance >= $2`, req.AccountID, req.Amount)
+	tag, err = tx.Exec(ctx, updateBalanceSQL, req.AccountID, req.Amount)
 	if err != nil {
 		return result, fmt.Errorf("update balance: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		var exists bool
-		if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=$1)", req.AccountID).
+		if err = tx.QueryRow(ctx, accountExistsSQL, req.AccountID).
 			Scan(&exists); err != nil {
 			return result, fmt.Errorf("check account: %w", err)
 		}

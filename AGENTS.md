@@ -16,6 +16,8 @@
 - Prefer the Go standard library and existing dependencies. Add dependencies only when necessary, and verify that they are pure Go, actively maintained, and not deprecated. Do not judge maintenance solely by recent release dates.
 - Use only pure Go libraries. Avoid obsolete or deprecated packages and functions, including in existing dependencies.
 - Follow `.golangci.yml` during implementation.
+- Keep production store SQL in descriptive `.sql` files and embed them with `//go:embed`; do not inline SQL statements in Go source or load SQL from the filesystem at runtime.
+- Keep SQL values parameterized through driver arguments; do not interpolate request values into SQL text.
 - Favor maintained APIs and straightforward designs that avoid brittle assumptions. Future-proofing must not expand the requested scope.
 - Log actionable debugging context and useful operational fields for metrics while protecting personally identifiable information (PII) and secrets.
 
